@@ -67,6 +67,54 @@ def get_author(item):
         name = str(author)
     return str(item.get("author_username") or item.get("uniqueId") or name).lstrip("@").casefold()
 
+def get_avatar_url(item):
+    """Tenta extrair a foto do perfil dos metadados retornados pelo coletor."""
+    author = item.get("authorMeta") or item.get("author") or item.get("author_info") or {}
+    if not isinstance(author, dict):
+        return ""
+    for key in ("avatar", "avatarUrl", "avatar_url", "avatarThumb", "avatarLarger", "profilePicture", "profile_picture", "cover"):
+        value = author.get(key)
+        if isinstance(value, str) and value.startswith("https://"):
+            return value
+        if isinstance(value, dict):
+            for nested_key in ("url_list", "urlList", "urls"):
+                nested = value.get(nested_key)
+                if isinstance(nested, list):
+                    for url in nested:
+                        if isinstance(url, str) and url.startswith("https://"):
+                            return url
+            for nested_key in ("url", "uri"):
+                url = value.get(nested_key)
+                if isinstance(url, str) and url.startswith("https://"):
+                    return url
+    return ""
+
+def estimate_suspicious_views(video_rows):
+    """Heurística exploratória; não confirma bots nem views compradas."""
+    views = sum(row["Visualizações"] for row in video_rows)
+    likes = sum(row["Curtidas"] for row in video_rows)
+    comments = sum(row["Comentários"] for row in video_rows)
+    shares = sum(row["Compartilhamentos"] for row in video_rows)
+    interactions = likes + comments + shares
+    if views <= 0:
+        return {"suspect": 0, "risk": "Indeterminado", "rate": 0.0, "reason": "Não há visualizações válidas para avaliar."}
+    rate = interactions / views
+    # Regra inicial conservadora e explícita: abaixo de 0,5% de interações totais,
+    # calcula apenas uma estimativa de sinal fraco, limitada a 80% das views.
+    if rate < 0.005:
+        fraction = min(0.80, max(0.0, (0.005 - rate) / 0.005))
+        risk = "Alto" if rate < 0.001 else "Médio"
+        reason = "Taxa de interações baixa em relação às visualizações. Isso pode ter várias causas legítimas e não comprova fraude."
+    elif rate < 0.01:
+        fraction = 0.0
+        risk = "Baixo"
+        reason = "A taxa de interações não acionou a regra inicial de alerta. Isso não garante autenticidade."
+    else:
+        fraction = 0.0
+        risk = "Baixo"
+        reason = "A taxa de interações não acionou a regra inicial de alerta. Isso não garante autenticidade."
+    return {"suspect": round(views * fraction), "risk": risk, "rate": rate * 100, "reason": reason}
+
 def get_url(item, username):
     url = item.get("webVideoUrl") or item.get("video_url") or item.get("share_url") or ""
     video_id = item.get("id") or item.get("video_id")
@@ -119,9 +167,11 @@ def parse_items(raw_items, username, tag):
         created = item.get("createTimeISO") or item.get("published_at") or item.get("createTime") or item.get("create_time") or ""
         if isinstance(created, (int, float)):
             created = datetime.fromtimestamp(created, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        avatar_url = get_avatar_url(item)
         found.append({
             "Data": str(created),
             "Perfil": "@" + username,
+            "Foto do perfil": avatar_url,
             "Legenda": caption,
             "Link": url,
             "Visualizações": n(first(item, ["playCount", "play_count", "plays", "viewCount", "views"])),
@@ -172,6 +222,7 @@ if search:
                     raw = collect(str(token).strip(), username, max_items)
                     st.session_state["results"] = parse_items(raw, username, tag)
                     st.session_state["raw_count"] = len(raw)
+                    st.session_state["profile_avatar"] = next((get_avatar_url(item) for item in raw if isinstance(item, dict) and get_avatar_url(item)), "")
                     st.session_state["current_profile"] = username
                     st.session_state["current_tag"] = tag
                     st.session_state["searched"] = True
@@ -185,6 +236,18 @@ if "results" not in st.session_state:
     st.info("Informe qualquer perfil público do TikTok e a hashtag desejada na barra lateral. Os totais aparecerão após a coleta.")
 else:
     results = st.session_state["results"]
+    profile_col, profile_info_col = st.columns([1, 5], vertical_alignment="center")
+    with profile_col:
+        avatar = st.session_state.get("profile_avatar", "")
+        if avatar:
+            st.image(avatar, width=112)
+        else:
+            st.markdown("<div style='width:96px;height:96px;border-radius:50%;background:#252a3a;display:flex;align-items:center;justify-content:center;font-size:2.5rem'>🎬</div>", unsafe_allow_html=True)
+    with profile_info_col:
+        st.markdown(f"### @{st.session_state['current_profile']}")
+        st.markdown(f"[Abrir perfil no TikTok](https://www.tiktok.com/@{st.session_state['current_profile']})")
+        if not avatar:
+            st.caption("O coletor não retornou uma foto de perfil nesta busca; isso pode variar conforme a disponibilidade dos dados.")
     totals = {
         "Visualizações": sum(x["Visualizações"] for x in results),
         "Curtidas": sum(x["Curtidas"] for x in results),
@@ -204,16 +267,31 @@ else:
     for col, (label, value, note, emoji) in zip(cols, data):
         with col:
             st.markdown(metric(label, value, note, emoji), unsafe_allow_html=True)
+
+    st.markdown('<div class="section">🕵️ Análise de visualizações suspeitas</div>', unsafe_allow_html=True)
+    suspicious = estimate_suspicious_views(results)
+    risk_color = {"Baixo": "#22c55e", "Médio": "#f59e0b", "Alto": "#ef4444"}.get(suspicious["risk"], "#94a3b8")
+    suspect_cols = st.columns(3)
+    with suspect_cols[0]:
+        st.metric("Estimativa de visualizações suspeitas", f'{suspicious["suspect"]:,}'.replace(",", "."))
+    with suspect_cols[1]:
+        st.markdown(f'<div class="metric"><div class="metric-label">Nível de risco</div><div class="metric-value" style="color:{risk_color}">{suspicious["risk"]}</div><div class="metric-note">Sinal heurístico, não uma confirmação</div></div>', unsafe_allow_html=True)
+    with suspect_cols[2]:
+        st.metric("Interações / visualizações", f'{suspicious["rate"]:.2f}%')
+    st.info(suspicious["reason"] + " A estimativa usa somente os totais públicos retornados pelo coletor; não identifica pessoas, bots ou compras de views. O limite inicial de 0,5% é uma regra heurística configurável, não um padrão oficial do TikTok.")
+
     st.markdown('<div class="section">📋 Vídeos encontrados</div>', unsafe_allow_html=True)
     if not results:
         st.warning("Nenhum vídeo correspondente foi encontrado nos itens retornados. Isso não prova que não existam outros vídeos.")
     else:
         df = pd.DataFrame(results)
-        st.dataframe(df, use_container_width=True, hide_index=True, column_config={
+        display_df = df.drop(columns=["Foto do perfil"], errors="ignore")
+        st.dataframe(display_df, use_container_width=True, hide_index=True, column_config={
             "Link": st.column_config.LinkColumn("Vídeo", display_text="Abrir no TikTok"),
             "Legenda": st.column_config.TextColumn("Legenda", width="large"),
         })
-        st.download_button("⬇️ Exportar CSV", data=df.to_csv(index=False).encode("utf-8-sig"), file_name="tiktok_tag_counter.csv", mime="text/csv")
+        export_df = display_df
+        st.download_button("⬇️ Exportar CSV", data=export_df.to_csv(index=False).encode("utf-8-sig"), file_name="tiktok_tag_counter.csv", mime="text/csv")
 
 st.divider()
 st.caption("As métricas e a cobertura dependem do que o coletor consegue acessar. Conteúdos privados, removidos ou não retornados ficam de fora; métricas ausentes podem aparecer como zero.")
