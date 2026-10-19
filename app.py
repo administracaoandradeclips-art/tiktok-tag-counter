@@ -3,7 +3,7 @@ import pandas as pd
 import streamlit as st
 from datetime import datetime, timezone
 
-st.set_page_config(page_title="TikTok Tag Counter", page_icon="🎬", layout="wide")
+st.set_page_config(page_title="Analise clips check", page_icon="🎬", layout="wide")
 DEFAULT_PROFILE = "cortesbatalhasdosfamosos"
 DEFAULT_TAG = "Casalcheck2Clips5K"
 ACTOR_ID = "poidata~tiktok-scraper"
