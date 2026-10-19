@@ -186,7 +186,14 @@ if st.session_state.error:
     st.warning(st.session_state.error)
 
 items = st.session_state.items
-df = pd.DataFrame(items)
+# Defensive normalization: session_state may contain None or a non-list value
+# after a Streamlit rerun / upgrade. Only pass a list of row dictionaries to pandas.
+if not isinstance(items, list):
+    items = []
+    st.session_state.items = items
+items = [item for item in items if isinstance(item, dict)]
+st.session_state.items = items
+df = pd.DataFrame.from_records(items) if items else pd.DataFrame()
 if not df.empty:
     for col in ["Visualizações", "Curtidas", "Comentários", "Compartilhamentos", "Engajamento (%)"]:
         if col not in df: df[col] = 0
